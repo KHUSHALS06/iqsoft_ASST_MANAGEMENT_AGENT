@@ -24,9 +24,14 @@ var hardwareScript = strings.Join([]string{
 }, "; ")
 
 var softwareScript = strings.Join([]string{
-	`$paths='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'`,
-	`$apps=@(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent -and -not $_.ParentKeyName } | ForEach-Object { @{name=[string]$_.DisplayName; version=[string]$_.DisplayVersion; publisher=[string]$_.Publisher; install_date=[string]$_.InstallDate} })`,
-	`ConvertTo-Json -InputObject $apps -Depth 3 -Compress`,
+	`$paths=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')`,
+	`$null=New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -ErrorAction SilentlyContinue`,
+	`$paths+=@(Get-ChildItem HKU:\ -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[0-9-]+$' } | ForEach-Object { 'HKU:\'+$_.PSChildName+'\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' })`,
+	`$seen=@{}`,
+	`$apps=@(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent -and -not $_.ParentKeyName } | ForEach-Object { $q=[char]34; $loc=([string]$_.InstallLocation).Trim().Trim($q); if(-not $loc -and $_.DisplayIcon){ $ic=([string]$_.DisplayIcon).Split(',')[0].Trim().Trim($q); if($ic -match '\.(exe|ico|dll)$'){ $loc=[string](Split-Path $ic -Parent -ErrorAction SilentlyContinue) } }; $src='Machine'; if($_.PSPath -like '*HKEY_USERS*'){ $src='Per-user' }; $k=[string]$_.DisplayName+'|'+[string]$_.DisplayVersion+'|'+$src; if(-not $seen.ContainsKey($k)){ $seen[$k]=1; @{name=[string]$_.DisplayName; version=[string]$_.DisplayVersion; publisher=[string]$_.Publisher; install_date=[string]$_.InstallDate; install_location=[string]$loc; source=$src} } })`,
+	`try { $pk=@(Get-AppxPackage -AllUsers -ErrorAction Stop) } catch { $pk=@(Get-AppxPackage -ErrorAction SilentlyContinue) }`,
+	`$store=@($pk | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.SignatureKind -ne 'System' } | ForEach-Object { $k=[string]$_.PackageFullName; if(-not $seen.ContainsKey($k)){ $seen[$k]=1; $pub=[string]$_.Publisher; if($pub -match 'CN=([^,]+)'){ $pub=$Matches[1].Trim([char]34) }; @{name=[string]$_.Name; version=[string]$_.Version; publisher=$pub; install_date=''; install_location=[string]$_.InstallLocation; source='Store'} } })`,
+	`ConvertTo-Json -InputObject @($apps + $store) -Depth 3 -Compress`,
 }, "; ")
 
 func runPS(script string) ([]byte, error) {
@@ -60,20 +65,22 @@ func collectInventory() ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func sendInventory(creds *Creds) {
+func sendInventory(creds *Creds) error {
 	log.Println("collecting inventory (takes a few seconds)...")
 	body, err := collectInventory()
 	if err != nil {
 		log.Println("inventory failed:", err)
-		return
+		return err
 	}
-	req, _ := http.NewRequest("POST", serverURL+"/inventory", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+creds.DeviceID+"."+creds.Secret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doAuthed(creds, "POST", "/inventory", body)
 	if err != nil {
 		log.Println("inventory upload failed:", err)
-		return
+		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	log.Printf("inventory sent (%d bytes): %s", len(body), resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server said: %s", resp.Status)
+	}
+	return nil
 }

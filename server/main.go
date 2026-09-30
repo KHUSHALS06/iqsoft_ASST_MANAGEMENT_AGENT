@@ -40,11 +40,12 @@ type persisted struct {
 	Tokens      map[string]bool            `json:"tokens"`
 	Devices     map[string]*Device         `json:"devices"`
 	Inventories map[string]json.RawMessage `json:"inventories"`
+	Jobs        map[string]*Job            `json:"jobs"`
 }
 
 // save writes everything to data.json. The caller must hold mu.
 func save() {
-	b, err := json.Marshal(persisted{tokens, devices, inventories})
+	b, err := json.Marshal(persisted{tokens, devices, inventories, jobs})
 	if err != nil {
 		log.Println("save failed:", err)
 		return
@@ -77,6 +78,9 @@ func load() {
 	}
 	if p.Inventories != nil {
 		inventories = p.Inventories
+	}
+	if p.Jobs != nil {
+		jobs = p.Jobs
 	}
 	log.Printf("loaded %d devices from %s", len(devices), dataFile)
 }
@@ -173,9 +177,10 @@ func main() {
 		}
 		mu.Lock()
 		d.LastSeen = time.Now()
+		orders := dispatchJobs(d.ID)
 		mu.Unlock()
-		log.Printf("heartbeat from %s (%s)", d.ID, d.Hostname)
-		w.Write([]byte(`{"ok":true}`))
+		log.Printf("heartbeat from %s (%s), %d job(s) dispatched", d.ID, d.Hostname, len(orders))
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "jobs": orders})
 	})
 
 	// Admin: list devices with a short summary (never includes secrets)
@@ -214,6 +219,7 @@ func main() {
 	}))
 
 	registerInventory()
+	registerJobs()
 
 	log.Println("server listening on :8080  (dashboard: http://localhost:8080)")
 	log.Fatal(http.ListenAndServe(":8080", nil))

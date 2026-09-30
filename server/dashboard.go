@@ -14,7 +14,7 @@ const dashboardHTML = `<!doctype html>
  .on{color:#0a7d2c;font-weight:600}.off{color:#b00020;font-weight:600}
  button{padding:5px 12px;margin-left:6px;cursor:pointer} input{padding:5px}
  .box{background:#fff;border:1px solid #dde;padding:14px;margin-top:18px;border-radius:6px}
- .kv td:first-child{width:170px;color:#555;background:#fafbfc} #err{color:#b00020;margin-left:10px}
+ .kv td:first-child{width:170px;color:#555;background:#fafbfc} #err,#jobmsg{color:#b00020;margin-left:10px}
  #tokbox{margin-top:10px;font-family:Consolas,monospace;background:#fffbe6;padding:8px;display:none;white-space:pre-wrap}
 </style></head><body>
 <h1>Endpoint Manager</h1>
@@ -33,10 +33,12 @@ const dashboardHTML = `<!doctype html>
 var $ = function(id){ return document.getElementById(id); };
 function el(tag, text, cls){ var e=document.createElement(tag); if(text!=null) e.textContent=text; if(cls) e.className=cls; return e; }
 function row(cells){ var tr=el('tr'); cells.forEach(function(c){ tr.appendChild(typeof c==='string'?el('td',c):c); }); return tr; }
-var selected = null, invCache = null;
+var selected = null, selectedDev = null, invCache = null, doneSeen = null;
 
-function api(path, method){
-  return fetch(path, {method: method||'GET', headers: {'X-Admin-Key': $('key').value}}).then(function(r){
+function api(path, method, body){
+  var h = {'X-Admin-Key': $('key').value};
+  if(body) h['Content-Type'] = 'application/json';
+  return fetch(path, {method: method||'GET', headers: h, body: body?JSON.stringify(body):undefined}).then(function(r){
     if(r.status===401) throw new Error('Wrong admin key');
     if(!r.ok) return r.text().then(function(t){ throw new Error(t.trim()||('Error '+r.status)); });
     return r.json();
@@ -62,7 +64,7 @@ function loadList(){
     list.forEach(function(d){
       var tr = row([d.hostname, el('td', d.online?'Online':'Offline', d.online?'on':'off'), ago(d.last_seen), d.model, d.os, d.user, d.apps?String(d.apps):'']);
       tr.className = 'dev' + (d.id===selected?' sel':'');
-      tr.onclick = function(){ selected=d.id; loadDetail(d); loadList(); };
+      tr.onclick = function(){ selected=d.id; selectedDev=d; doneSeen=null; loadDetail(d); loadList(); };
       tb.appendChild(tr);
     });
   }).catch(fail);
@@ -74,7 +76,8 @@ function loadDetail(d){
   }).catch(function(e){
     var box=el('div',null,'box'); box.appendChild(el('h2', d.hostname));
     box.appendChild(el('p', 'No inventory yet ('+e.message+'). The agent sends it right after it starts.'));
-    $('detail').replaceChildren(box);
+    $('detail').replaceChildren(actionsBox(d), box);
+    loadJobs();
   });
 }
 
@@ -93,20 +96,88 @@ function renderDetail(d, inv){
   box.appendChild(kv);
   var sw = (inv.software||[]).slice().sort(function(a,b){ return a.name.toLowerCase()<b.name.toLowerCase()?-1:1; });
   box.appendChild(el('h3', 'Installed software ('+sw.length+')'));
-  var f = el('input'); f.placeholder='Filter by name or publisher'; f.size=30; box.appendChild(f);
+  var f = el('input'); f.placeholder='Filter by name, publisher, type or location'; f.size=30; box.appendChild(f);
   var t = el('table'); t.style.marginTop='8px';
-  t.appendChild(row(['Name','Version','Publisher','Installed']));
+  t.appendChild(row(['Name','Version','Publisher','Type','Installed','Install location']));
   var body = el('tbody'); t.appendChild(body); box.appendChild(t);
   function draw(){
     var q=f.value.toLowerCase(); body.replaceChildren();
     sw.forEach(function(a){
-      if(q && (a.name+' '+a.publisher).toLowerCase().indexOf(q)<0) return;
+      if(q && (a.name+' '+a.publisher+' '+(a.source||'')+' '+(a.install_location||'')).toLowerCase().indexOf(q)<0) return;
       var ins=(a.install_date||'').replace(/^(\d{4})(\d\d)(\d\d)$/,'$1-$2-$3');
-      body.appendChild(row([a.name, a.version, a.publisher, ins]));
+      var loc=el('td', a.install_location||''); loc.style.wordBreak='break-all';
+      body.appendChild(row([a.name, a.version, a.publisher, a.source||'', ins, loc]));
     });
   }
   f.oninput = draw; draw();
-  $('detail').replaceChildren(box);
+  $('detail').replaceChildren(actionsBox(d), box);
+  loadJobs();
+}
+
+function sendJob(type, params){
+  if(!selected) return;
+  api('/admin/devices/'+selected+'/jobs', 'POST', {type: type, params: params}).then(function(){
+    $('jobmsg').textContent = '';
+    loadJobs();
+  }).catch(function(e){ $('jobmsg').textContent = e.message; });
+}
+
+function actionsBox(d){
+  var box = el('div', null, 'box');
+  box.appendChild(el('h2', 'Actions'));
+  var rb = el('button', 'Refresh inventory'); rb.style.marginLeft = '0';
+  rb.onclick = function(){ sendJob('refresh_inventory', {}); };
+  box.appendChild(rb);
+  var line = el('div'); line.style.marginTop = '10px';
+  var pid = el('input'); pid.placeholder = 'winget package id, e.g. Google.Chrome'; pid.size = 36;
+  var pv = el('input'); pv.placeholder = 'version (optional)'; pv.size = 16; pv.style.marginLeft = '6px';
+  line.appendChild(pid); line.appendChild(pv);
+  [['Install','winget_install'],['Upgrade','winget_upgrade'],['Uninstall','winget_uninstall']].forEach(function(a){
+    var b = el('button', a[0]);
+    b.onclick = function(){
+      var id = pid.value.trim();
+      if(!id){ $('jobmsg').textContent = 'Enter a winget package id'; return; }
+      if(a[1]==='winget_uninstall' && !confirm('Uninstall '+id+' from '+d.hostname+'?')) return;
+      var p = {id: id};
+      if(pv.value.trim()) p.version = pv.value.trim();
+      sendJob(a[1], p);
+    };
+    line.appendChild(b);
+  });
+  var msg = el('span'); msg.id = 'jobmsg'; line.appendChild(msg);
+  box.appendChild(line);
+  box.appendChild(el('h3', 'Recent jobs'));
+  var jl = el('div'); jl.id = 'jobs'; box.appendChild(jl);
+  return box;
+}
+
+function drawJobs(list){
+  var box = $('jobs'); if(!box) return;
+  if(!list.length){ box.replaceChildren(el('p', 'No jobs yet.')); return; }
+  var t = el('table');
+  t.appendChild(row(['Created', 'Action', 'Package', 'Status', 'Output']));
+  list.forEach(function(j){
+    var p = j.params || {};
+    var out = el('td', (j.output||'').slice(-300)); out.style.whiteSpace = 'pre-wrap'; out.title = j.output || '';
+    var st = el('td', j.status, j.status==='done' ? 'on' : (j.status==='failed' ? 'off' : null));
+    t.appendChild(row([new Date(j.created_at).toLocaleString(), j.type, (p.id||'')+(p.version?' '+p.version:''), st, out]));
+  });
+  box.replaceChildren(t);
+}
+
+function loadJobs(){
+  if(!selected || !$('jobs')) return;
+  var dev = selectedDev;
+  api('/admin/devices/'+selected+'/jobs').then(function(list){
+    if(dev !== selectedDev) return;
+    var ids = {}, newDone = false;
+    list.forEach(function(j){
+      if(j.status==='done'){ ids[j.id] = 1; if(doneSeen && !doneSeen[j.id]) newDone = true; }
+    });
+    doneSeen = ids;
+    drawJobs(list);
+    if(newDone) loadDetail(dev);
+  }).catch(function(){});
 }
 
 $('load').onclick = loadList;
@@ -118,5 +189,5 @@ $('newtok').onclick = function(){
 };
 $('key').value = sessionStorage.getItem('adminkey') || '';
 if($('key').value) loadList();
-setInterval(function(){ if($('key').value && !$('err').textContent) loadList(); }, 5000);
+setInterval(function(){ if($('key').value && !$('err').textContent){ loadList(); loadJobs(); } }, 5000);
 </script></body></html>`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -48,6 +49,29 @@ func enroll(token, host string) (*Creds, error) {
 	return &c, os.WriteFile(credsFile, b, 0o600)
 }
 
+func heartbeat(creds *Creds) {
+	resp, err := doAuthed(creds, "POST", "/heartbeat", []byte("{}"))
+	if err != nil {
+		log.Println("cannot reach server:", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Println("heartbeat:", resp.Status)
+		return
+	}
+	var hb struct {
+		Jobs []Job `json:"jobs"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&hb) != nil {
+		return
+	}
+	for _, j := range hb.Jobs {
+		log.Printf("job %s queued: %s", j.ID, j.Type)
+		enqueue(creds, j)
+	}
+}
+
 func main() {
 	token := flag.String("enroll", "", "one-time enrollment token")
 	flag.Parse()
@@ -65,18 +89,11 @@ func main() {
 		log.Println("enrolled as", creds.DeviceID)
 	}
 
-	sendInventory(creds) // <-- Step 3: collects and uploads inventory (from inventory.go)
+	go jobWorker(creds)
+	sendInventory(creds)
 
 	for {
-		req, _ := http.NewRequest("POST", serverURL+"/heartbeat", bytes.NewReader([]byte("{}")))
-		req.Header.Set("Authorization", "Bearer "+creds.DeviceID+"."+creds.Secret)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Println("cannot reach server:", err)
-		} else {
-			log.Println("heartbeat:", resp.Status)
-			resp.Body.Close()
-		}
+		heartbeat(creds)
 		time.Sleep(5 * time.Second)
 	}
 }
