@@ -250,11 +250,12 @@ var (
 	procEndPaint         = user32.NewProc("EndPaint")
 	procFillRect         = user32.NewProc("FillRect")
 	procDrawTextW        = user32.NewProc("DrawTextW")
-	procSetTextColor     = user32.NewProc("SetTextColor")
-	procSetBkMode        = user32.NewProc("SetBkMode")
 
 	gdi32                = syscall.NewLazyDLL("gdi32.dll")
 	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
+	procDeleteObject     = gdi32.NewProc("DeleteObject")
+	procSetTextColor     = gdi32.NewProc("SetTextColor")
+	procSetBkMode        = gdi32.NewProc("SetBkMode")
 
 	kernel32             = syscall.NewLazyDLL("kernel32.dll")
 	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
@@ -310,6 +311,7 @@ func indicatorWndProc(hwnd syscall.Handle, m uintptr, wParam, lParam uintptr) ui
 		hdc, _, _ := procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 		brush, _, _ := procCreateSolidBrush.Call(0x000033CC) // BGR: strong red
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&ps.RcPaint)), brush)
+		procDeleteObject.Call(brush)
 		procSetBkMode.Call(hdc, 1) // TRANSPARENT
 		procSetTextColor.Call(hdc, 0x00FFFFFF)
 		text, _ := syscall.UTF16PtrFromString(bannerText)

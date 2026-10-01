@@ -200,6 +200,16 @@ func registerRemote() {
 			if err != nil {
 				break
 			}
+			if mt == websocket.TextMessage {
+				var ctl struct {
+					T string `json:"t"`
+				}
+				if json.Unmarshal(data, &ctl) == nil && ctl.T == "end" {
+					log.Printf("remote %s: ended by viewer", s.id)
+					closeRemoteSession(s.id)
+					break
+				}
+			}
 			s.mu.Lock()
 			agent := s.agent
 			s.mu.Unlock()
@@ -230,35 +240,66 @@ const remoteViewHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Remote session</title>
 <style>
-  body { margin:0; background:#1e1e1e; color:#ddd; font-family:system-ui,sans-serif; display:flex; flex-direction:column; height:100vh; }
-  #bar { padding:8px 12px; background:#111; font-size:13px; display:flex; gap:16px; align-items:center; }
+  html, body { height:100%; }
+  body { margin:0; background:#1e1e1e; color:#ddd; font-family:system-ui,sans-serif; display:flex; flex-direction:column; }
+  #bar { padding:8px 12px; background:#111; font-size:13px; display:flex; gap:12px; align-items:center; }
   #bar b { color:#4ade80; }
-  #stage { flex:1; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  #bar .sp { flex:1; }
+  #bar button { padding:5px 12px; border:0; border-radius:4px; background:#333; color:#eee; cursor:pointer; }
+  #bar button:hover { background:#444; }
+  #bar button.danger { background:#b91c1c; }
+  #bar button.danger:hover { background:#dc2626; }
+  #bar button:disabled { opacity:.5; cursor:default; }
+  #stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
   img { max-width:100%; max-height:100%; cursor:crosshair; }
   #status { color:#f59e0b; }
+  #hot { display:none; position:fixed; top:0; left:0; right:0; height:6px; z-index:11; }
+  body.fs #hot { display:block; }
+  body.fs #bar { position:fixed; top:0; left:0; right:0; z-index:10; transform:translateY(-100%); transition:transform .15s; }
+  body.fs #bar.show { transform:none; }
 </style>
 </head>
 <body>
-  <div id="bar">Remote session <b id="sid"></b> <span id="status">connecting…</span></div>
+  <div id="bar">
+    <span>Remote session <b id="sid"></b></span>
+    <span id="status">connecting…</span>
+    <span class="sp"></span>
+    <button id="fs">Fullscreen</button>
+    <button id="end" class="danger">End session</button>
+  </div>
+  <div id="hot"></div>
   <div id="stage"><img id="frame"></div>
 <script>
 const params = new URLSearchParams(location.search);
 const sid = params.get("session");
 document.getElementById("sid").textContent = sid;
-const adminKey = prompt("Admin key:");
+const adminKey = sessionStorage.getItem("adminkey") || prompt("Admin key:");
 const proto = location.protocol === "https:" ? "wss" : "ws";
 const ws = new WebSocket(proto + "://" + location.host + "/remote/viewer-ws?session=" + encodeURIComponent(sid) + "&admin_key=" + encodeURIComponent(adminKey));
 ws.binaryType = "arraybuffer";
 const img = document.getElementById("frame");
 const status = document.getElementById("status");
+const bar = document.getElementById("bar");
+const hot = document.getElementById("hot");
+const fsBtn = document.getElementById("fs");
+const endBtn = document.getElementById("end");
+let ended = false;
+
+function finish(text) {
+  status.textContent = text;
+  status.style.color = "#f87171";
+  endBtn.disabled = true;
+  if (document.fullscreenElement) document.exitFullscreen();
+}
 
 ws.onopen = () => status.textContent = "waiting for agent…";
-ws.onclose = () => status.textContent = "disconnected";
-ws.onerror = () => status.textContent = "error";
+ws.onclose = () => finish(ended ? "session ended" : "disconnected");
+ws.onerror = () => { if (!ended) status.textContent = "error"; };
 
 ws.onmessage = (ev) => {
-  if (typeof ev.data === "string") return; // control messages, unused for now
+  if (typeof ev.data === "string") return;
   status.textContent = "live";
+  status.style.color = "";
   const blob = new Blob([ev.data], { type: "image/jpeg" });
   const url = URL.createObjectURL(blob);
   const old = img.src;
@@ -267,8 +308,31 @@ ws.onmessage = (ev) => {
 };
 
 function sendEvent(obj) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (!ended && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
+
+fsBtn.addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+  fsBtn.blur();
+});
+
+document.addEventListener("fullscreenchange", () => {
+  const on = !!document.fullscreenElement;
+  document.body.classList.toggle("fs", on);
+  bar.classList.remove("show");
+  fsBtn.textContent = on ? "Exit fullscreen" : "Fullscreen";
+});
+
+hot.addEventListener("mouseenter", () => bar.classList.add("show"));
+bar.addEventListener("mouseleave", () => bar.classList.remove("show"));
+
+endBtn.addEventListener("click", () => {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: "end" }));
+  ended = true;
+  finish("session ended");
+  ws.close();
+});
 
 img.addEventListener("mousemove", (e) => {
   const r = img.getBoundingClientRect();
@@ -278,8 +342,8 @@ img.addEventListener("mousedown", (e) => sendEvent({ t: "down", button: e.button
 img.addEventListener("mouseup", (e) => sendEvent({ t: "up", button: e.button }));
 img.addEventListener("wheel", (e) => { sendEvent({ t: "scroll", dy: e.deltaY }); e.preventDefault(); }, { passive: false });
 img.addEventListener("contextmenu", (e) => e.preventDefault());
-window.addEventListener("keydown", (e) => { sendEvent({ t: "keydown", key: e.key }); });
-window.addEventListener("keyup", (e) => { sendEvent({ t: "keyup", key: e.key }); });
+window.addEventListener("keydown", (e) => { sendEvent({ t: "keydown", key: e.key }); e.preventDefault(); });
+window.addEventListener("keyup", (e) => { sendEvent({ t: "keyup", key: e.key }); e.preventDefault(); });
 </script>
 </body>
 </html>`

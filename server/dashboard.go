@@ -86,9 +86,10 @@ function renderDetail(d, inv){
   box.appendChild(el('h2', d.hostname+'  ('+d.id+')'));
   var kv = el('table',null,'kv');
   var disks = (hw.disks||[]).map(function(x){ return x.model+' ('+x.size_gb+' GB)'; }).join(', ');
+  var vols = (hw.volumes||[]).map(function(v){ return v.drive+'  '+(v.label||'')+'  '+v.size_gb+' GB ('+v.free_gb+' GB free)  '+v.type; }).join('\n');
   var nics = (hw.nics||[]).map(function(n){ return n.description+'  MAC '+(n.mac||'-')+'  IP '+(n.ips||[]).join(', '); }).join('\n');
   [['Manufacturer / model', (hw.manufacturer||'')+' '+(hw.model||'')], ['Serial number', hw.serial||''],
-   ['CPU', (hw.cpu||'')+' ('+hw.cpu_cores+' cores)'], ['RAM', hw.ram_gb+' GB'], ['Disks', disks],
+   ['CPU', (hw.cpu||'')+' ('+hw.cpu_cores+' cores)'], ['RAM', hw.ram_gb+' GB'], ['Disks', disks], ['Drives', vols],
    ['Operating system', (hw.os_name||'')+' '+(hw.os_version||'')], ['BIOS', hw.bios_version||''],
    ['Logged-in user', inv.logged_in_user||''], ['Network', nics]].forEach(function(p){
     var v=el('td', p[1]); v.style.whiteSpace='pre-wrap'; kv.appendChild(row([p[0], v]));
@@ -97,19 +98,25 @@ function renderDetail(d, inv){
   var sw = (inv.software||[]).slice().sort(function(a,b){ return a.name.toLowerCase()<b.name.toLowerCase()?-1:1; });
   box.appendChild(el('h3', 'Installed software ('+sw.length+')'));
   var f = el('input'); f.placeholder='Filter by name, publisher, type or location'; f.size=30; box.appendChild(f);
+  var ds = el('select'); ds.style.marginLeft='8px'; ds.style.padding='5px';
+  var dset = {}; sw.forEach(function(a){ dset[a.drive||'Unknown']=1; });
+  ds.appendChild(new Option('All drives',''));
+  Object.keys(dset).sort().forEach(function(k){ ds.appendChild(new Option(k,k)); });
+  box.appendChild(ds);
   var t = el('table'); t.style.marginTop='8px';
-  t.appendChild(row(['Name','Version','Publisher','Type','Installed','Install location']));
+  t.appendChild(row(['Name','Version','Publisher','Type','Drive','Installed','Install location']));
   var body = el('tbody'); t.appendChild(body); box.appendChild(t);
   function draw(){
-    var q=f.value.toLowerCase(); body.replaceChildren();
+    var q=f.value.toLowerCase(), dv=ds.value; body.replaceChildren();
     sw.forEach(function(a){
-      if(q && (a.name+' '+a.publisher+' '+(a.source||'')+' '+(a.install_location||'')).toLowerCase().indexOf(q)<0) return;
+      if(dv && (a.drive||'Unknown')!==dv) return;
+      if(q && (a.name+' '+a.publisher+' '+(a.source||'')+' '+(a.drive||'')+' '+(a.install_location||'')).toLowerCase().indexOf(q)<0) return;
       var ins=(a.install_date||'').replace(/^(\d{4})(\d\d)(\d\d)$/,'$1-$2-$3');
       var loc=el('td', a.install_location||''); loc.style.wordBreak='break-all';
-      body.appendChild(row([a.name, a.version, a.publisher, a.source||'', ins, loc]));
+      body.appendChild(row([a.name, a.version, a.publisher, a.source||'', a.drive||'', ins, loc]));
     });
   }
-  f.oninput = draw; draw();
+  f.oninput = draw; ds.onchange = draw; draw();
   $('detail').replaceChildren(actionsBox(d), box);
   loadJobs();
 }

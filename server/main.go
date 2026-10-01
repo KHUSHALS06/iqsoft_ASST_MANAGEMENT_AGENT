@@ -14,8 +14,14 @@ import (
 	"time"
 )
 
+var adminKey = func() string {
+	if v := os.Getenv("ADMIN_KEY"); v != "" {
+		return v
+	}
+	return "change-me"
+}()
+
 const (
-	adminKey     = "change-me" // dev only; we'll make this configurable later
 	dataFile     = "data.json"
 	onlineWindow = 20 * time.Second // agent heartbeats every 5s
 )

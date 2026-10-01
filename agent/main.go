@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -25,10 +26,9 @@ func logCrash(r any) {
 	fmt.Fprintf(f, "%s panic: %v\n%s\n", time.Now().Format(time.RFC3339), r, debug.Stack())
 }
 
-const (
-	serverURL = "http://localhost:8080"
-	credsFile = "agent-creds.json"
-)
+var serverURL = "http://192.168.1.5:8080"
+
+const credsFile = "agent-creds.json"
 
 type Creds struct {
 	DeviceID string `json:"device_id"`
@@ -94,7 +94,9 @@ func main() {
 	}()
 
 	token := flag.String("enroll", "", "one-time enrollment token")
+	server := flag.String("server", serverURL, "server base URL")
 	flag.Parse()
+	serverURL = strings.TrimRight(*server, "/")
 	host, _ := os.Hostname()
 
 	creds, err := loadCreds()
