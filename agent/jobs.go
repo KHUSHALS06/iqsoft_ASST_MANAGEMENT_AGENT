@@ -107,6 +107,11 @@ func execute(creds *Creds, j Job) (string, string) {
 			}
 		}
 		return status, out
+	case "start_remote":
+		if err := runRemoteSession(creds, j.Params["session_id"]); err != nil {
+			return "failed", err.Error()
+		}
+		return "done", "remote session ended"
 	}
 	return "failed", "unsupported job type: " + j.Type
 }
@@ -126,7 +131,7 @@ func reportResult(creds *Creds, id, status, output string) {
 			log.Printf("job %s: result rejected: %s", id, resp.Status)
 			return
 		}
-		log.Printf("job %s: %s", id, status)
+		log.Printf("job %s: %s — %s", id, status, output)
 		return
 	}
 }
@@ -141,6 +146,16 @@ func enqueue(creds *Creds, j Job) {
 
 func jobWorker(creds *Creds) {
 	for j := range jobQueue {
+		if j.Type == "start_remote" {
+			// Remote sessions can run for a long time and must not block
+			// ordinary jobs (winget installs etc.) queued behind them.
+			go func(j Job) {
+				log.Printf("job %s: running %s", j.ID, j.Type)
+				status, out := execute(creds, j)
+				reportResult(creds, j.ID, status, out)
+			}(j)
+			continue
+		}
 		log.Printf("job %s: running %s", j.ID, j.Type)
 		status, out := execute(creds, j)
 		reportResult(creds, j.ID, status, out)

@@ -128,6 +128,17 @@ function actionsBox(d){
   var rb = el('button', 'Refresh inventory'); rb.style.marginLeft = '0';
   rb.onclick = function(){ sendJob('refresh_inventory', {}); };
   box.appendChild(rb);
+  var remoteBtn = el('button', 'Remote session');
+  remoteBtn.title = 'Opens a live screen-share to this device. A red banner is shown on the device the whole time.';
+  remoteBtn.onclick = function(){
+    if(!d.online){ $('jobmsg').textContent = 'Device is offline'; return; }
+    if(!confirm('Start a remote session on '+d.hostname+'? A visible banner will show on that screen for the whole session.')) return;
+    api('/admin/devices/'+d.id+'/remote', 'POST').then(function(r){
+      $('jobmsg').textContent = '';
+      window.open(r.viewer_url, '_blank');
+    }).catch(function(e){ $('jobmsg').textContent = e.message; });
+  };
+  box.appendChild(remoteBtn);
   var line = el('div'); line.style.marginTop = '10px';
   var pid = el('input'); pid.placeholder = 'winget package id, e.g. Google.Chrome'; pid.size = 36;
   var pv = el('input'); pv.placeholder = 'version (optional)'; pv.size = 16; pv.style.marginLeft = '6px';

@@ -9,8 +9,21 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"time"
 )
+
+// logCrash appends a panic + stack trace to crash.log so it survives a
+// console window closing itself, and is callable from any goroutine (unlike
+// a bare recover() in main, which only catches panics on its own goroutine).
+func logCrash(r any) {
+	f, err := os.OpenFile("crash.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s panic: %v\n%s\n", time.Now().Format(time.RFC3339), r, debug.Stack())
+}
 
 const (
 	serverURL = "http://localhost:8080"
@@ -73,6 +86,13 @@ func heartbeat(creds *Creds) {
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			logCrash(r)
+			log.Fatalf("panic: %v", r)
+		}
+	}()
+
 	token := flag.String("enroll", "", "one-time enrollment token")
 	flag.Parse()
 	host, _ := os.Hostname()

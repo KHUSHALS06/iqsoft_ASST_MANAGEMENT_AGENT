@@ -1,0 +1,29 @@
+2026-10-01T13:08:58+05:30 panic: Failed to find SetBkMode procedure in user32.dll: The specified procedure could not be found.
+goroutine 10 [running, locked to thread]:
+runtime/debug.Stack()
+	C:/Program Files/Go/src/runtime/debug/stack.go:26 +0x5e
+main.logCrash({0x7ff7e248e4e0, 0x23f604744060})
+	C:/dev/endpoint-manager/agent/main.go:25 +0xb4
+main.runIndicatorWindow.func1()
+	C:/dev/endpoint-manager/agent/remote_windows.go:339 +0x3d
+panic({0x7ff7e248e4e0?, 0x23f604744060?})
+	C:/Program Files/Go/src/runtime/panic.go:859 +0x125
+syscall.(*LazyProc).mustFind(...)
+	C:/Program Files/Go/src/syscall/dll_windows.go:359
+syscall.(*LazyProc).Call(0x7ff7e2564dd0, {0x23f6045e4410, 0x2, 0x2})
+	C:/Program Files/Go/src/syscall/dll_windows.go:375 +0x59
+main.indicatorWndProc(0x1204d0, 0x47?, 0x0?, 0xce4adff180?)
+	C:/dev/endpoint-manager/agent/remote_windows.go:313 +0x165
+syscall.syscalln(0x7ff7e1e44e51?, 0x23f604636b00?, {0x23f6045e43d0?, 0x7ff7e1ed20a9?, 0x23f6045e2558?})
+	C:/Program Files/Go/src/runtime/syscall_windows.go:427 +0x48
+syscall.SyscallN(0x0?, {0x23f6045e43d0?, 0x0?, 0x7ff7e1edbf40?})
+	C:/Program Files/Go/src/syscall/dll_windows.go:99 +0x1e
+syscall.(*Proc).Call(0x7ff7e2564c68?, {0x23f6045e43d0?, 0x23f6045e43d0?, 0x23f604635808?})
+	C:/Program Files/Go/src/syscall/dll_windows.go:256 +0x1c
+syscall.(*LazyProc).Call(0x7ff7e2564c68, {0x23f6045e43d0, 0x1, 0x1})
+	C:/Program Files/Go/src/syscall/dll_windows.go:376 +0x4a
+main.runIndicatorWindow(0x23f604717960, 0x23f6045f4620)
+	C:/dev/endpoint-manager/agent/remote_windows.go:391 +0x5f3
+created by main.indicatorShow in goroutine 53
+	C:/dev/endpoint-manager/agent/remote_windows.go:209 +0x147
+
