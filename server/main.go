@@ -18,7 +18,7 @@ var adminKey = func() string {
 	if v := os.Getenv("ADMIN_KEY"); v != "" {
 		return v
 	}
-	return "change-me"
+	return "" // no key: the dashboard and admin API are open
 }()
 
 const (
@@ -47,11 +47,12 @@ type persisted struct {
 	Devices     map[string]*Device         `json:"devices"`
 	Inventories map[string]json.RawMessage `json:"inventories"`
 	Jobs        map[string]*Job            `json:"jobs"`
+	AppPolicies map[string]*AppPolicy      `json:"app_policies"`
 }
 
 // save writes everything to data.json. The caller must hold mu.
 func save() {
-	b, err := json.Marshal(persisted{tokens, devices, inventories, jobs})
+	b, err := json.Marshal(persisted{Tokens: tokens, Devices: devices, Inventories: inventories, Jobs: jobs, AppPolicies: appPolicies})
 	if err != nil {
 		log.Println("save failed:", err)
 		return
@@ -88,6 +89,9 @@ func load() {
 	if p.Jobs != nil {
 		jobs = p.Jobs
 	}
+	if p.AppPolicies != nil {
+		appPolicies = p.AppPolicies
+	}
 	log.Printf("loaded %d devices from %s", len(devices), dataFile)
 }
 
@@ -121,7 +125,7 @@ func authDevice(r *http.Request) *Device {
 // admin wraps a handler so it only runs with the correct X-Admin-Key header.
 func admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(adminKey)) != 1 {
+		if adminKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(adminKey)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -131,11 +135,14 @@ func admin(h http.HandlerFunc) http.HandlerFunc {
 
 func main() {
 	load()
+	if adminKey == "" {
+		log.Println("WARNING: ADMIN_KEY not set - the dashboard and admin API are open to anyone who can reach this server")
+	}
 
 	// The dashboard page
 	http.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(dashboardHTML))
+		w.Write([]byte(dashboardPage))
 	})
 
 	// Admin: create a one-time enrollment token
@@ -229,6 +236,7 @@ func main() {
 	registerInventory()
 	registerJobs()
 	registerRemote()
+	registerAppVersions()
 
 	log.Println("server listening on :8080  (dashboard: http://localhost:8080)")
 	log.Fatal(http.ListenAndServe(":8080", nil))
