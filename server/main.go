@@ -160,11 +160,13 @@ func main() {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		if !tokens[req.Token] {
-			http.Error(w, "invalid or used token", http.StatusForbidden)
-			return
+		if req.Token != "" { // tokens are optional now (open enrollment); a given token must still be valid
+			if !tokens[req.Token] {
+				http.Error(w, "invalid or used token", http.StatusForbidden)
+				return
+			}
+			delete(tokens, req.Token) // single use
 		}
-		delete(tokens, req.Token) // single use
 		secret := randHex(16)
 		d := &Device{ID: "dev_" + randHex(4), Hostname: req.Hostname, SecretHash: hashHex(secret), EnrolledAt: time.Now()}
 		devices[d.ID] = d

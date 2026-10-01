@@ -83,6 +83,11 @@ type keybdInputWrap struct {
 		Time        uint32
 		DwExtraInfo uintptr
 	}
+	// The real Windows INPUT struct is 40 bytes on amd64 (the union is sized
+	// by MOUSEINPUT). KEYBDINPUT is 8 bytes smaller, so without this padding
+	// the struct is 32 bytes, SendInput rejects it (cbSize mismatch) and
+	// every keystroke is silently dropped while the mouse still works.
+	_ [8]byte
 }
 
 func screenSize() (int32, int32) {
