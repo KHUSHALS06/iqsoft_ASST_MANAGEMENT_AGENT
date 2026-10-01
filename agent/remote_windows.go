@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/kbinani/screenshot"
@@ -83,11 +84,6 @@ type keybdInputWrap struct {
 		Time        uint32
 		DwExtraInfo uintptr
 	}
-	// The real Windows INPUT struct is 40 bytes on amd64 (the union is sized
-	// by MOUSEINPUT). KEYBDINPUT is 8 bytes smaller, so without this padding
-	// the struct is 32 bytes, SendInput rejects it (cbSize mismatch) and
-	// every keystroke is silently dropped while the mouse still works.
-	_ [8]byte
 }
 
 func screenSize() (int32, int32) {
@@ -197,22 +193,94 @@ func applyInput(ev inputEvent) {
 // device should still be visible to whoever is sitting at it.
 
 var (
-	indMu   sync.Mutex
-	indHwnd syscall.Handle
-	indDone chan struct{}
+	indMu          sync.Mutex
+	indHwnd        syscall.Handle
+	indDone        chan struct{}
+	indClassReady  bool
+	indClassNameP  *uint16
+	indHInstance   syscall.Handle
 )
 
+// registerIndicatorClass registers the window class exactly once per
+// process. A second RegisterClassExW with the same class name fails with
+// ERROR_CLASS_ALREADY_EXISTS (1410) - expected from the second remote
+// session onward in a long-running agent, so that specific error is treated
+// as success rather than a failure.
+func registerIndicatorClass() error {
+	indMu.Lock()
+	defer indMu.Unlock()
+	if indClassReady {
+		return nil
+	}
+	className, _ := syscall.UTF16PtrFromString("IQSoftRemoteIndicator")
+	hInstance, _, _ := procGetModuleHandleW.Call(0)
+
+	wc := wndClassEx{
+		CbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
+		LpfnWndProc:   syscall.NewCallback(indicatorWndProc),
+		HInstance:     syscall.Handle(hInstance),
+		LpszClassName: className,
+	}
+	const errorClassAlreadyExists = 1410
+	if a, _, callErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); a == 0 {
+		if errno, ok := callErr.(syscall.Errno); !ok || errno != errorClassAlreadyExists {
+			return fmt.Errorf("RegisterClassEx failed: %v", callErr)
+		}
+		// Already registered (e.g. by an in-process path we didn't track) -
+		// fine, proceed using this class name.
+	}
+	indClassNameP = className
+	indHInstance = syscall.Handle(hInstance)
+	indClassReady = true
+	return nil
+}
+
+// isWindowAlive reports whether hwnd still refers to a real, visible window.
+// Used to detect a stale handle left over if a previous indicatorHide()
+// never completed (e.g. explorer.exe restarted underneath it) - without
+// this check, indicatorShow would wrongly believe the indicator is already
+// showing and skip creating a new one, leaving nothing on screen.
+func isWindowAlive(hwnd syscall.Handle) bool {
+	if hwnd == 0 {
+		return false
+	}
+	r, _, _ := procIsWindow.Call(uintptr(hwnd))
+	return r != 0
+}
+
+// indicatorShow makes the on-screen indicator visible, retrying through any
+// recoverable Win32 hiccup instead of giving up on the first one - a remote
+// session must never be blocked by a transient window-creation failure.
 func indicatorShow() error {
 	indMu.Lock()
-	if indHwnd != 0 {
+	if isWindowAlive(indHwnd) {
 		indMu.Unlock()
 		return nil // already showing
 	}
-	ready := make(chan error, 1)
-	indDone = make(chan struct{})
+	indHwnd = 0 // clear any stale handle
 	indMu.Unlock()
-	go runIndicatorWindow(ready, indDone)
-	return <-ready
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := registerIndicatorClass(); err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		indMu.Lock()
+		ready := make(chan error, 1)
+		indDone = make(chan struct{})
+		indMu.Unlock()
+		go runIndicatorWindow(ready, indDone)
+		if err := <-ready; err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("after 3 attempts: %w", lastErr)
 }
 
 func indicatorHide() {
@@ -251,6 +319,7 @@ var (
 	procPostQuitMessage  = user32.NewProc("PostQuitMessage")
 	procPostMessageW     = user32.NewProc("PostMessageW")
 	procDestroyWindow    = user32.NewProc("DestroyWindow")
+	procIsWindow         = user32.NewProc("IsWindow")
 	procBeginPaint       = user32.NewProc("BeginPaint")
 	procEndPaint         = user32.NewProc("EndPaint")
 	procFillRect         = user32.NewProc("FillRect")
@@ -303,8 +372,6 @@ func postMessage(hwnd syscall.Handle, m uint32, w, l uintptr) {
 	procPostMessageW.Call(uintptr(hwnd), uintptr(m), w, l)
 }
 
-const bannerText = "Remote support session active"
-
 // m is uintptr, not uint32: syscall.NewCallback requires every parameter of
 // a callback function to be exactly pointer-sized (8 bytes on amd64). A
 // uint32 here silently breaks the calling convention and crashes the
@@ -314,16 +381,9 @@ func indicatorWndProc(hwnd syscall.Handle, m uintptr, wParam, lParam uintptr) ui
 	case wmPaint:
 		var ps paintStruct
 		hdc, _, _ := procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
-		brush, _, _ := procCreateSolidBrush.Call(0x000033CC) // BGR: strong red
+		brush, _, _ := procCreateSolidBrush.Call(0x00000000) // black
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&ps.RcPaint)), brush)
 		procDeleteObject.Call(brush)
-		procSetBkMode.Call(hdc, 1) // TRANSPARENT
-		procSetTextColor.Call(hdc, 0x00FFFFFF)
-		text, _ := syscall.UTF16PtrFromString(bannerText)
-		r := ps.RcPaint
-		const dtCenter, dtVCenter, dtSingleLine = 0x0001, 0x0004, 0x0020
-		procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(text)), ^uintptr(0),
-			uintptr(unsafe.Pointer(&r)), dtCenter|dtVCenter|dtSingleLine)
 		procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 		return 0
 	case wmDestroy:
@@ -351,31 +411,20 @@ func runIndicatorWindow(ready chan<- error, done chan<- struct{}) {
 		}
 	}()
 
-	className, _ := syscall.UTF16PtrFromString("IQSoftRemoteIndicator")
-	hInstance, _, _ := procGetModuleHandleW.Call(0)
-
-	wc := wndClassEx{
-		CbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
-		LpfnWndProc:   syscall.NewCallback(indicatorWndProc),
-		HInstance:     syscall.Handle(hInstance),
-		LpszClassName: className,
-	}
-	if a, _, _ := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); a == 0 {
-		ready <- fmt.Errorf("RegisterClassEx failed")
-		return
-	}
+	className := indClassNameP
+	hInstance := uintptr(indHInstance)
 
 	sw, _, _ := procGetSystemMetrics.Call(uintptr(smCxScreen))
 	screenW := int32(sw)
-	const width, height = 420, 30
-	x := (screenW - width) / 2
+	const height = 4 // thin strip, full width, no text
+	width := screenW
 
 	hwnd, _, _ := procCreateWindowExW.Call(
 		uintptr(wsExTopmost|wsExToolWindow),
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(className)),
 		uintptr(wsPopup|wsVisible),
-		uintptr(x), 0, width, height,
+		0, 0, uintptr(width), height,
 		0, 0, hInstance, 0,
 	)
 	if hwnd == 0 {
