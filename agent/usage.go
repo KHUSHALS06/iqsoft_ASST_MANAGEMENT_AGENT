@@ -49,7 +49,7 @@ var (
 	usageCurLast time.Time
 )
 
-func usageFilePath() string { return filepath.Join(exeDir(), "usage-pending.json") }
+func usageFilePath() string { return filepath.Join(dataDir(), "usage-pending.json") }
 
 func loadUsagePending() {
 	b, err := os.ReadFile(usageFilePath())

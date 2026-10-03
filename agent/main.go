@@ -1,244 +1,365 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
+	"bytes"
 	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
-var adminKey = func() string {
-	if v := os.Getenv("ADMIN_KEY"); v != "" {
-		return v
+// exeDir returns the folder the agent.exe lives in, so files are always
+// found no matter where the agent was launched from (double-click, service, etc).
+func exeDir() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Dir(exe)
 	}
-	return "" // no key: the dashboard and admin API are open
-}()
-
-const (
-	dataFile     = "data.json"
-	onlineWindow = 20 * time.Second // agent heartbeats every 5s
-)
-
-type Device struct {
-	ID         string    `json:"id"`
-	Hostname   string    `json:"hostname"`
-	SecretHash string    `json:"secret_hash"` // we never store the secret itself
-	EnrolledAt time.Time `json:"enrolled_at"`
-	LastSeen   time.Time `json:"last_seen"`
+	return "."
 }
 
-// All state below is protected by mu.
-var (
-	mu          sync.Mutex
-	tokens      = map[string]bool{}
-	devices     = map[string]*Device{}
-	inventories = map[string]json.RawMessage{}
-)
-
-type persisted struct {
-	Tokens      map[string]bool            `json:"tokens"`
-	Devices     map[string]*Device         `json:"devices"`
-	Inventories map[string]json.RawMessage `json:"inventories"`
-	Jobs        map[string]*Job            `json:"jobs"`
-	AppPolicies map[string]*AppPolicy      `json:"app_policies"`
-}
-
-// save writes everything to data.json. The caller must hold mu.
-func save() {
-	b, err := json.Marshal(persisted{Tokens: tokens, Devices: devices, Inventories: inventories, Jobs: jobs, AppPolicies: appPolicies})
-	if err != nil {
-		log.Println("save failed:", err)
-		return
+// dataDir is where the agent keeps files it WRITES (credentials, usage queue,
+// logs): %ProgramData%\IQSoft. This is deliberately separate from exeDir() so
+// agent.exe can live in a folder only administrators can write to (e.g.
+// C:\\Program Files\\IQSoft) while the agent, which runs as the logged-in user,
+// can still save its data. Falls back to the exe folder if ProgramData is unavailable.
+func dataDir() string {
+	base := os.Getenv("ProgramData")
+	if base == "" {
+		return exeDir()
 	}
-	tmp := dataFile + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		log.Println("save failed:", err)
-		return
-	}
-	if err := os.Rename(tmp, dataFile); err != nil {
-		log.Println("save failed:", err)
-	}
-}
-
-func load() {
-	b, err := os.ReadFile(dataFile)
-	if err != nil {
-		return // first run: nothing saved yet
-	}
-	var p persisted
-	if err := json.Unmarshal(b, &p); err != nil {
-		log.Println("could not read", dataFile, "- starting empty:", err)
-		return
-	}
-	if p.Tokens != nil {
-		tokens = p.Tokens
-	}
-	if p.Devices != nil {
-		devices = p.Devices
-	}
-	if p.Inventories != nil {
-		inventories = p.Inventories
-	}
-	if p.Jobs != nil {
-		jobs = p.Jobs
-	}
-	if p.AppPolicies != nil {
-		appPolicies = p.AppPolicies
-	}
-	log.Printf("loaded %d devices from %s", len(devices), dataFile)
-}
-
-func randHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func hashHex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
-}
-
-// authDevice checks the "Authorization: Bearer <id>.<secret>" header.
-func authDevice(r *http.Request) *Device {
-	cred := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, secret, ok := strings.Cut(cred, ".")
-	if !ok {
-		return nil
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	d := devices[id]
-	if d == nil || subtle.ConstantTimeCompare([]byte(d.SecretHash), []byte(hashHex(secret))) != 1 {
-		return nil
+	d := filepath.Join(base, "IQSoft")
+	if _, err := os.Stat(d); err != nil {
+		if os.MkdirAll(d, 0o755) != nil {
+			return exeDir()
+		}
+		if isElevatedAdmin() { // SYSTEM (service-launched agent) or an elevated admin
+			// Let all local users (S-1-5-32-545) write here, so the agent works in every session.
+			runHidden("icacls", d, "/grant", "*S-1-5-32-545:(OI)(CI)M")
+		}
 	}
 	return d
 }
 
-// admin wraps a handler so it only runs with the correct X-Admin-Key header.
-func admin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if adminKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(adminKey)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+// migrateOldFiles moves files an earlier version kept next to the exe.
+func migrateOldFiles() {
+	for _, n := range []string{"agent-creds.json", "usage-pending.json"} {
+		oldP, newP := filepath.Join(exeDir(), n), filepath.Join(dataDir(), n)
+		if oldP == newP {
+			continue
 		}
-		h(w, r)
+		if _, err := os.Stat(newP); err == nil {
+			continue
+		}
+		if b, err := os.ReadFile(oldP); err == nil && os.WriteFile(newP, b, 0o600) == nil {
+			os.Remove(oldP) // best effort: may be refused if the folder is protected
+		}
 	}
 }
 
+// logCrash appends a panic + stack trace to crash.log (next to the exe) so it
+// survives a console window closing itself, and is callable from any goroutine.
+func logCrash(r any) {
+	f, err := os.OpenFile(filepath.Join(dataDir(), "crash.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s panic: %v\n%s\n", time.Now().Format(time.RFC3339), r, debug.Stack())
+}
+
+// Default server. Override without rebuilding: -server flag, or a server.txt
+// file next to agent.exe containing e.g.  http://192.168.1.5:8080
+var serverURL = "http://192.168.1.5:8080"
+
+const (
+	inventoryEvery  = 6 * time.Hour   // ADDED: periodic inventory refresh
+	usageFlushEvery = 3 * time.Minute // ADDED: upload app usage
+	svcName         = "IQSoftEndpointSvc"
+)
+
+func credsPath() string { return filepath.Join(dataDir(), "agent-creds.json") }
+
+type Creds struct {
+	DeviceID string `json:"device_id"`
+	Secret   string `json:"secret"`
+}
+
+func loadCreds() (*Creds, error) {
+	b, err := os.ReadFile(credsPath())
+	if err != nil {
+		return nil, err
+	}
+	var c Creds
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	if c.DeviceID == "" || c.Secret == "" {
+		return nil, fmt.Errorf("creds file is empty")
+	}
+	return &c, nil
+}
+
+// enroll registers this PC with the server. The token is optional: an empty
+// token means "open enrollment" (server must allow it).
+func enroll(token, host string) (*Creds, error) {
+	body, _ := json.Marshal(map[string]string{"token": token, "hostname": host})
+	resp, err := httpClient.Post(serverURL+"/enroll", "application/json", bytes.NewReader(body)) // httpClient has a timeout; http.Post does not
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server said: %s", resp.Status)
+	}
+	var c Creds
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		return nil, err
+	}
+	b, _ := json.MarshalIndent(c, "", "  ")
+	return &c, os.WriteFile(credsPath(), b, 0o600)
+}
+
+func heartbeat(creds *Creds) bool {
+	resp, err := doAuthed(creds, "POST", "/heartbeat", []byte("{}"))
+	if err != nil {
+		log.Println("cannot reach server:", err)
+		return true
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		log.Println("server no longer knows this device, re-enrolling")
+		return false
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Println("heartbeat:", resp.Status)
+		return true
+	}
+	var hb struct {
+		Jobs []Job `json:"jobs"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&hb) != nil {
+		return true
+	}
+	for _, j := range hb.Jobs {
+		log.Printf("job %s queued: %s", j.ID, j.Type)
+		enqueue(creds, j)
+	}
+	return true
+}
+
+// ---- ADDED helpers --------------------------------------------------------
+
+// safely runs fn, logging a panic to crash.log instead of killing the agent.
+func safely(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logCrash(r)
+		}
+	}()
+	fn()
+}
+
+// setupLogging: the exe is built with -H=windowsgui, so stderr goes nowhere.
+func setupLogging() {
+	p := filepath.Join(dataDir(), "agent.log")
+	if st, err := os.Stat(p); err == nil && st.Size() > 2<<20 {
+		os.Remove(p + ".old")
+		os.Rename(p, p+".old")
+	}
+	if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		log.SetOutput(f)
+	}
+}
+
+// server.txt next to the exe overrides the built-in default (the service
+// starts agent.exe with no arguments, so a file is the practical way).
+func serverFromFile() string {
+	b, err := os.ReadFile(filepath.Join(exeDir(), "server.txt"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(string(b), "\xef\xbb\xbf"))
+}
+
+var procCreateMutexW = kernel32.NewProc("CreateMutexW")
+
+// acquireSingleInstance: one agent per desktop session. Retries briefly
+// because the service may be swapping out the previous process.
+func acquireSingleInstance() bool {
+	name, _ := syscall.UTF16PtrFromString(`Local\IQSoftEndpointAgent`)
+	for i := 0; i < 6; i++ {
+		h, _, err := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(name)))
+		if h != 0 {
+			if errno, ok := err.(syscall.Errno); ok && errno == 183 { // ERROR_ALREADY_EXISTS
+				syscall.CloseHandle(syscall.Handle(h))
+			} else {
+				return true // handle kept open for the life of the process
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	return false
+}
+
+func serviceInstalled() bool {
+	cmd := exec.Command("sc", "query", svcName)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	return cmd.Run() == nil
+}
+
+// ---- ADDED: admin-only uninstall -------------------------------------------
+
+var procMessageBoxW = user32.NewProc("MessageBoxW")
+
+// msgBox shows a message to the user. The agent is built windowless
+// (-H=windowsgui), so printing to stdout would be invisible.
+func msgBox(text string) {
+	t, _ := syscall.UTF16PtrFromString(text)
+	c, _ := syscall.UTF16PtrFromString("IQSoft Endpoint Agent")
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(t)), uintptr(unsafe.Pointer(c)), 0x40) // MB_ICONINFORMATION
+}
+
+// isElevatedAdmin is true only for a process running with an elevated
+// administrator token (or SYSTEM). A standard user cannot obtain one without
+// entering an administrator's credentials at the UAC prompt, and an admin who
+// has not chosen "Run as administrator" does not have one either.
+func isElevatedAdmin() bool { return windows.GetCurrentProcessToken().IsElevated() }
+
+func runHidden(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	return cmd.Run()
+}
+
+// uninstallAgent returns the process exit code. Refuses unless elevated.
+func uninstallAgent() int {
+	if !isElevatedAdmin() {
+		log.Println("uninstall refused: caller is not an elevated administrator")
+		msgBox("Only an administrator can uninstall the IQSoft agent.\n\n" +
+			"Right-click agent.exe and choose \"Run as administrator\" with the -uninstall option.")
+		return 5 // ERROR_ACCESS_DENIED
+	}
+	log.Println("uninstall: authorised (elevated administrator)")
+	// Stop whatever would relaunch or keep the agent alive, then every running copy.
+	if serviceInstalled() {
+		runHidden("sc", "stop", svcName)
+		time.Sleep(4 * time.Second) // let the service stop and kill its child
+		runHidden("sc", "delete", svcName)
+	}
+	removeAutostart()
+	if exe, err := os.Executable(); err == nil {
+		runHidden("taskkill", "/F", "/IM", filepath.Base(exe), "/FI", fmt.Sprintf("PID ne %d", os.Getpid()))
+	}
+	time.Sleep(time.Second)
+	os.Remove(credsPath())
+	os.Remove(usageFilePath())
+	log.Println("uninstall: done. Delete this folder to remove the remaining files.")
+	msgBox("The IQSoft agent was uninstalled on this PC.\n\nYou can now delete its folder.")
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+
 func main() {
-	load()
-	if adminKey == "" {
-		log.Println("WARNING: ADMIN_KEY not set - the dashboard and admin API are open to anyone who can reach this server")
+	defer func() {
+		if r := recover(); r != nil {
+			logCrash(r)
+			log.Fatalf("panic: %v", r)
+		}
+	}()
+
+	token := flag.String("enroll", "", "optional enrollment token (not needed if the server allows open enrollment)")
+	server := flag.String("server", "", "server base URL (default: server.txt, else "+serverURL+")")
+	uninstall := flag.Bool("uninstall", false, "uninstall the agent (administrators only: needs an elevated prompt), then exit") // ADDED
+	flag.Parse()
+	setupLogging()
+
+	switch {
+	case *server != "":
+		serverURL = *server
+	case serverFromFile() != "":
+		serverURL = serverFromFile()
+	}
+	serverURL = strings.TrimRight(serverURL, "/")
+	host, _ := os.Hostname()
+
+	if *uninstall {
+		os.Exit(uninstallAgent())
 	}
 
-	// The dashboard page
-	http.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(dashboardPage))
-	})
+	if !acquireSingleInstance() {
+		log.Println("another agent is already running in this session - exiting")
+		return
+	}
+	log.Println("agent starting, server:", serverURL)
 
-	// Admin: create a one-time enrollment token
-	http.HandleFunc("POST /admin/token", admin(func(w http.ResponseWriter, r *http.Request) {
-		tok := "enr_" + randHex(8)
-		mu.Lock()
-		tokens[tok] = true
-		save()
-		mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]string{"token": tok})
-	}))
+	// One launcher should own startup. If the SYSTEM service is installed it
+	// relaunches the agent itself; a leftover logon task would fight it.
+	if serviceInstalled() {
+		removeAutostart()
+	} else {
+		ensureAutostart()
+	}
 
-	// Agent: exchange a token for an ID + secret
-	http.HandleFunc("POST /enroll", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Token    string `json:"token"`
-			Hostname string `json:"hostname"`
+	// Enroll automatically on first run; keep retrying instead of exiting,
+	// so the window never just closes if the server is unreachable.
+	migrateOldFiles()
+	creds, err := loadCreds()
+	for err != nil {
+		log.Println("not enrolled yet, contacting", serverURL)
+		creds, err = enroll(*token, host)
+		if err != nil {
+			log.Println("enroll failed, retrying in 10s:", err)
+			time.Sleep(10 * time.Second)
+			continue
 		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if req.Token != "" { // tokens are optional now (open enrollment); a given token must still be valid
-			if !tokens[req.Token] {
-				http.Error(w, "invalid or used token", http.StatusForbidden)
-				return
+		log.Println("enrolled as", creds.DeviceID)
+	}
+
+	go jobWorker(creds)
+	startUsageTracker() // ADDED
+	go safely(func() {  // ADDED: upload app usage every few minutes
+		for range time.Tick(usageFlushEvery) {
+			if err := flushUsage(creds); err != nil {
+				log.Println("usage upload failed (will retry):", err)
 			}
-			delete(tokens, req.Token) // single use
 		}
-		secret := randHex(16)
-		d := &Device{ID: "dev_" + randHex(4), Hostname: req.Hostname, SecretHash: hashHex(secret), EnrolledAt: time.Now()}
-		devices[d.ID] = d
-		save()
-		log.Printf("enrolled %s (%s)", d.ID, d.Hostname)
-		json.NewEncoder(w).Encode(map[string]string{"device_id": d.ID, "secret": secret})
 	})
-
-	// Agent: heartbeat (must be authenticated).
-	// We don't save to disk here: it happens every 5 seconds per device.
-	http.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		d := authDevice(r)
-		if d == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+	go safely(func() { // ADDED: refresh inventory periodically
+		for range time.Tick(inventoryEvery) {
+			sendInventory(creds)
 		}
-		mu.Lock()
-		d.LastSeen = time.Now()
-		orders := dispatchJobs(d.ID)
-		mu.Unlock()
-		log.Printf("heartbeat from %s (%s), %d job(s) dispatched", d.ID, d.Hostname, len(orders))
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "jobs": orders})
 	})
+	sendInventory(creds)
 
-	// Admin: list devices with a short summary (never includes secrets)
-	http.HandleFunc("GET /admin/devices", admin(func(w http.ResponseWriter, r *http.Request) {
-		type view struct {
-			ID       string    `json:"id"`
-			Hostname string    `json:"hostname"`
-			Online   bool      `json:"online"`
-			LastSeen time.Time `json:"last_seen"`
-			Model    string    `json:"model"`
-			OS       string    `json:"os"`
-			User     string    `json:"user"`
-			Apps     int       `json:"apps"`
-		}
-		mu.Lock()
-		out := []view{}
-		for _, d := range devices {
-			v := view{ID: d.ID, Hostname: d.Hostname, LastSeen: d.LastSeen, Online: time.Since(d.LastSeen) < onlineWindow}
-			if raw, ok := inventories[d.ID]; ok {
-				var inv struct {
-					Hardware struct {
-						Model  string `json:"model"`
-						OSName string `json:"os_name"`
-					} `json:"hardware"`
-					User     string            `json:"logged_in_user"`
-					Software []json.RawMessage `json:"software"`
+	for {
+		if !heartbeat(creds) {
+			os.Remove(credsPath())
+			for {
+				c, err := enroll("", host)
+				if err != nil {
+					log.Println("re-enroll failed, retrying in 10s:", err)
+					time.Sleep(10 * time.Second)
+					continue
 				}
-				if json.Unmarshal(raw, &inv) == nil {
-					v.Model, v.OS, v.User, v.Apps = inv.Hardware.Model, inv.Hardware.OSName, inv.User, len(inv.Software)
-				}
+				*creds = *c
+				log.Println("enrolled as", creds.DeviceID)
+				sendInventory(creds)
+				break
 			}
-			out = append(out, v)
 		}
-		mu.Unlock()
-		json.NewEncoder(w).Encode(out)
-	}))
-
-	registerInventory()
-	registerJobs()
-	registerRemote()
-	registerAppVersions()
-	registerWingetSearch()
-
-	log.Println("server listening on :8080  (dashboard: http://localhost:8080)")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+		time.Sleep(5 * time.Second)
+	}
 }

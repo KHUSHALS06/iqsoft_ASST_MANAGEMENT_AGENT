@@ -26,6 +26,7 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -63,16 +64,16 @@ var (
 )
 
 const (
-	tokenDuplicate         = 0x0002
-	tokenQuery             = 0x0008
-	tokenAdjustDefault     = 0x0080
-	tokenAdjustSessionID   = 0x0100
-	tokenPrimary           = 1
-	securityImpersonation  = 2
-	tokenInfoClassSession  = 12 // TokenSessionId
-	createUnicodeEnv       = 0x00000400
-	createNoWindow         = 0x08000000
-	stillActive            = 259
+	tokenDuplicate        = 0x0002
+	tokenQuery            = 0x0008
+	tokenAdjustDefault    = 0x0080
+	tokenAdjustSessionID  = 0x0100
+	tokenPrimary          = 1
+	securityImpersonation = 2
+	tokenInfoClassSession = 12 // TokenSessionId
+	createUnicodeEnv      = 0x00000400
+	createNoWindow        = 0x08000000
+	stillActive           = 259
 )
 
 // STARTUPINFOW / PROCESS_INFORMATION - field order matches the real Win32
@@ -304,6 +305,13 @@ func installService(exe string) error {
 		return err
 	}
 	defer s.Close()
+	// Pre-create the agent's data folder and let all local users write to it
+	// (the agent runs as the logged-in user, but its exe folder can stay admin-only).
+	if pd := os.Getenv("ProgramData"); pd != "" {
+		d := filepath.Join(pd, "IQSoft")
+		os.MkdirAll(d, 0o755)
+		exec.Command("icacls", d, "/grant", "*S-1-5-32-545:(OI)(CI)M").Run()
+	}
 	return nil
 }
 
@@ -331,6 +339,16 @@ func main() {
 	}
 
 	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install", "remove", "start", "stop":
+			// Only an elevated administrator may manage the service. Windows
+			// already denies standard users on a service created by an admin;
+			// this check just gives a clear message instead of "access denied".
+			if !windows.GetCurrentProcessToken().IsElevated() {
+				fmt.Println("this command must be run as Administrator")
+				os.Exit(5)
+			}
+		}
 		exe := mustExe()
 		switch os.Args[1] {
 		case "install":
