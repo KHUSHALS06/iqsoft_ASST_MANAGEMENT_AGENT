@@ -6,27 +6,45 @@ const dashboardHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Endpoint Manager</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- body{font:14px Segoe UI,system-ui,sans-serif;margin:24px;color:#1a1a1a;background:#f6f7f9}
- h1{font-size:22px;margin:0 0 16px} h2{font-size:17px;margin:0 0 8px} h3{font-size:15px;margin:18px 0 6px}
- table{border-collapse:collapse;width:100%;background:#fff}
- th,td{border:1px solid #dde;padding:6px 10px;text-align:left;vertical-align:top} th{background:#eceff4}
- tr.dev{cursor:pointer} tr.dev:hover{background:#eef4ff} tr.sel{background:#dce9ff}
- .on{color:#0a7d2c;font-weight:600}.off{color:#b00020;font-weight:600}
- button{padding:5px 12px;margin-left:6px;cursor:pointer} input{padding:5px}
- .box{background:#fff;border:1px solid #dde;padding:14px;margin-top:18px;border-radius:6px}
- .kv td:first-child{width:170px;color:#555;background:#fafbfc} #err,#jobmsg{color:#b00020;margin-left:10px}
- #tokbox{margin-top:10px;font-family:Consolas,monospace;background:#fffbe6;padding:8px;display:none;white-space:pre-wrap}
+ :root{--bg:#f4f6fa;--card:#fff;--line:#e3e7ee;--txt:#1b2230;--mut:#6b7585;--pri:#2563eb;--ok:#15803d;--bad:#b91c1c}
+ *{box-sizing:border-box}
+ body{font:14px/1.45 Segoe UI,system-ui,sans-serif;margin:0;color:var(--txt);background:var(--bg)}
+ header{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:10px 20px;background:#0f172a;color:#fff}
+ header b{font-size:16px;margin-right:14px} .sp{flex:1}
+ header input{width:180px}
+ nav{display:flex;gap:4px} nav button{background:transparent;color:#cbd5e1;border:0;padding:7px 14px;border-radius:6px;cursor:pointer;margin:0}
+ nav button.act{background:#1e293b;color:#fff}
+ .pane{padding:20px;max-width:1500px;margin:0 auto} .pane[hidden]{display:none}
+ #app{display:grid;grid-template-columns:300px 1fr;gap:20px;align-items:start}
+ aside{position:sticky;top:64px;max-height:calc(100vh - 84px);overflow:auto}
+ #q{width:100%;margin-bottom:10px}
+ .dc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+ .dc:hover{border-color:var(--pri)} .dc.sel{border-color:var(--pri);box-shadow:0 0 0 2px #dbe7ff}
+ .dc b{display:block} .dc small{color:var(--mut)}
+ .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#9aa3b2} .dot.on{background:#22c55e}
+ input,select{padding:7px 10px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff;color:var(--txt)}
+ button{padding:7px 14px;margin-left:6px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;font:inherit}
+ button:hover{border-color:var(--pri);color:var(--pri)}
+ button.primary{background:var(--pri);border-color:var(--pri);color:#fff} button.primary:hover{color:#fff;opacity:.9}
+ header button{background:var(--pri);border-color:var(--pri);color:#fff}
+ h2{font-size:16px;margin:0 0 10px} h3{font-size:14px;margin:20px 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+ .box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+ table{border-collapse:collapse;width:100%;background:#fff;border-radius:8px;overflow:hidden}
+ th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+ th{background:#f1f4f9;font-weight:600;color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+ .kv td:first-child{width:170px;color:var(--mut);background:#fafbfd}
+ .on{color:var(--ok);font-weight:600}.off{color:var(--bad);font-weight:600}
+ #err,#jobmsg{color:#fca5a5;margin-left:10px} #jobmsg{color:var(--bad)}
+ .hint,.empty{color:var(--mut);padding:30px;text-align:center;background:var(--card);border:1px dashed var(--line);border-radius:10px}
+ @media(max-width:900px){#app{grid-template-columns:1fr} aside{position:static;max-height:none}}
 </style></head><body>
-<h1>Endpoint Manager</h1>
-<div>
- <input id="key" type="password" placeholder="Admin key" size="24">
- <button id="load">Load</button>
- <span id="err"></span>
-</div>
-<div class="box"><h2>Devices</h2>
-<table><thead><tr><th>Computer</th><th>Status</th><th>Last seen</th><th>Model</th><th>OS</th><th>User</th><th>Apps</th></tr></thead>
-<tbody id="rows"><tr><td colspan="7">Enter the admin key and click Load.</td></tr></tbody></table></div>
-<div id="detail"></div>
+<header><b>Endpoint Manager</b><nav id="tabs"></nav><span class="sp"></span>
+ <input id="key" type="password" placeholder="Admin key"><button id="load">Connect</button><span id="err"></span></header>
+<div class="pane" id="pane-devices"><div id="app">
+ <aside><input id="q" placeholder="Search computers"><div id="list"><p class="hint">Enter the admin key and click Connect.</p></div></aside>
+ <section><div id="detail"><p class="hint">Select a computer from the list.</p></div></section>
+</div></div>
+<div class="pane" id="pane-apps" hidden></div><div class="pane" id="pane-restrict" hidden></div>
 <script>
 var $ = function(id){ return document.getElementById(id); };
 function el(tag, text, cls){ var e=document.createElement(tag); if(text!=null) e.textContent=text; if(cls) e.className=cls; return e; }
@@ -53,21 +71,28 @@ function ago(t){
 }
 function fail(e){ $('err').textContent = e.message; }
 
+var devList = [];
+function drawList(){
+  var box=$('list'), q=$('q').value.toLowerCase(); box.replaceChildren();
+  var shown = devList.filter(function(d){ return !q || (d.hostname+' '+d.user+' '+d.model).toLowerCase().indexOf(q)>=0; });
+  if(!devList.length){ box.appendChild(el('p','No devices yet. Start the agent on a computer and it will appear here.','hint')); return; }
+  shown.forEach(function(d){
+    var c = el('div', null, 'dc' + (d.id===selected?' sel':''));
+    var t = el('b'); t.appendChild(el('span', null, 'dot'+(d.online?' on':''))); t.appendChild(document.createTextNode(d.hostname)); c.appendChild(t);
+    c.appendChild(el('small', (d.online?'Online':'Offline ' + ago(d.last_seen))+(d.user?' \u00b7 '+d.user:'')));
+    c.onclick = function(){ selected=d.id; selectedDev=d; doneSeen=null; loadDetail(d); drawList(); };
+    box.appendChild(c);
+  });
+}
 function loadList(){
   api('/admin/devices').then(function(list){
     $('err').textContent = '';
     sessionStorage.setItem('adminkey', $('key').value);
-    var tb=$('rows'); tb.replaceChildren();
-    if(!list.length){ tb.appendChild(row(['No devices yet. Start the agent on a computer and it will appear here.','','','','','',''])); return; }
     list.sort(function(a,b){ return a.hostname.localeCompare(b.hostname); });
-    list.forEach(function(d){
-      var tr = row([d.hostname, el('td', d.online?'Online':'Offline', d.online?'on':'off'), ago(d.last_seen), d.model, d.os, d.user, d.apps?String(d.apps):'']);
-      tr.className = 'dev' + (d.id===selected?' sel':'');
-      tr.onclick = function(){ selected=d.id; selectedDev=d; doneSeen=null; loadDetail(d); loadList(); };
-      tb.appendChild(tr);
-    });
+    devList = list; drawList();
   }).catch(fail);
 }
+$('q').oninput = drawList;
 
 function loadDetail(d){
   api('/admin/devices/'+d.id+'/inventory').then(function(inv){
@@ -134,15 +159,16 @@ function actionsBox(d){
   var rb = el('button', 'Refresh inventory'); rb.style.marginLeft = '0';
   rb.onclick = function(){ sendJob('refresh_inventory', {}); };
   box.appendChild(rb);
-  var remoteBtn = el('button', 'Remote session');
+  var remoteBtn = el('button', 'Remote session', 'primary');
   remoteBtn.title = 'Opens a live screen-share to this device. A red banner is shown on the device the whole time.';
   remoteBtn.onclick = function(){
     if(!d.online){ $('jobmsg').textContent = 'Device is offline'; return; }
     if(!confirm('Start a remote session on '+d.hostname+'? A visible banner will show on that screen for the whole session.')) return;
+    var w = window.open('', '_blank');
     api('/admin/devices/'+d.id+'/remote', 'POST').then(function(r){
       $('jobmsg').textContent = '';
-      window.open(r.viewer_url, '_blank');
-    }).catch(function(e){ $('jobmsg').textContent = e.message; });
+      if(w) w.location = r.viewer_url; else $('jobmsg').textContent = 'Popup blocked. Open: ' + r.viewer_url;
+    }).catch(function(e){ if(w) w.close(); $('jobmsg').textContent = e.message; });
   };
   box.appendChild(remoteBtn);
   var line = el('div'); line.style.marginTop = '10px';

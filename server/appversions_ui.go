@@ -237,4 +237,24 @@ refresh();
 </script>`
 
 // dashboardPage is the existing dashboard with the App versions panel appended.
-var dashboardPage = strings.Replace(dashboardHTML, "</body></html>", appVersionsPanel+restrictionsPanel+"</body></html>", 1)
+var dashboardPage = strings.Replace(dashboardHTML, "</body></html>", appVersionsPanel+restrictionsPanel+tabsPanel+"</body></html>", 1)
+
+const tabsPanel = `<script>
+(function(){
+var panes = [['devices','Computers'],['apps','App policies'],['restrict','Restrictions']];
+var d = $('detail'), par = d.parentNode;
+Array.prototype.slice.call(par.querySelectorAll('.box')).forEach(function(b){
+  if(b.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING){
+    var h = b.querySelector('h2');
+    $('pane-' + (h && h.textContent.indexOf('Install / uninstall protection')===0 ? 'restrict' : 'apps')).appendChild(b);
+  }
+});
+var nav = $('tabs');
+function show(id){
+  panes.forEach(function(p){ $('pane-'+p[0]).hidden = p[0]!==id; });
+  Array.prototype.forEach.call(nav.children, function(b){ b.className = b.dataset.id===id ? 'act' : ''; });
+}
+panes.forEach(function(p){ var b = el('button', p[1]); b.dataset.id = p[0]; b.onclick = function(){ show(p[0]); }; nav.appendChild(b); });
+show('devices');
+})();
+</script>`

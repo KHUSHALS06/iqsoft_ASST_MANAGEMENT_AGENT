@@ -56,7 +56,8 @@ const (
 	mouseEventMiddleUp   = 0x0040
 	mouseEventWheel      = 0x0800
 
-	keyEventKeyUp = 0x0002
+	keyEventKeyUp    = 0x0002
+	keyEventExtended = 0x0001
 )
 
 // mouseInputWrap and keybdInputWrap mirror the C INPUT union for the mouse
@@ -84,6 +85,7 @@ type keybdInputWrap struct {
 		Time        uint32
 		DwExtraInfo uintptr
 	}
+	_ [8]byte
 }
 
 func screenSize() (int32, int32) {
@@ -99,11 +101,22 @@ func sendMouse(dx, dy int32, flags uint32) {
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 }
 
+func isExtendedKey(vk uint16) bool {
+	switch vk {
+	case 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B:
+		return true
+	}
+	return false
+}
+
 func sendKey(vk uint16, up bool) {
 	in := keybdInputWrap{Type: inputKeyboard}
 	in.Ki.Vk = vk
 	if up {
 		in.Ki.DwFlags = keyEventKeyUp
+	}
+	if isExtendedKey(vk) {
+		in.Ki.DwFlags |= keyEventExtended
 	}
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 }
@@ -139,6 +152,33 @@ func keyToVK(key string) (uint16, bool) {
 		return 0x12, true
 	case " ":
 		return 0x20, true
+	case "Home":
+		return 0x24, true
+	case "End":
+		return 0x23, true
+	case "PageUp":
+		return 0x21, true
+	case "PageDown":
+		return 0x22, true
+	case "Insert":
+		return 0x2D, true
+	case "CapsLock":
+		return 0x14, true
+	case "Meta":
+		return 0x5B, true
+	}
+	if len(key) >= 2 && key[0] == 'F' {
+		n := 0
+		for _, c := range key[1:] {
+			if c < '0' || c > '9' {
+				n = 0
+				break
+			}
+			n = n*10 + int(c-'0')
+		}
+		if n >= 1 && n <= 12 {
+			return uint16(0x6F + n), true
+		}
 	}
 	if len([]rune(key)) == 1 {
 		r, _, _ := procVkKeyScanW.Call(uintptr([]rune(key)[0]))

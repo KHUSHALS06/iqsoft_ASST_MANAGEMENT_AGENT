@@ -177,12 +177,14 @@ func registerRemote() {
 	// ?admin_key= because a browser can't set a custom header on the
 	// WebSocket handshake request.
 	http.HandleFunc("GET /remote/viewer-ws", func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("admin_key")), []byte(adminKey)) != 1 {
+		if adminKey != "" && subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("admin_key")), []byte(adminKey)) != 1 {
+			log.Printf("remote viewer rejected: wrong admin key")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		s := getRemoteSession(r.URL.Query().Get("session"))
 		if s == nil {
+			log.Printf("remote viewer rejected: session %s not found (expired or agent already left)", r.URL.Query().Get("session"))
 			http.Error(w, "no such session", http.StatusNotFound)
 			return
 		}
@@ -283,7 +285,7 @@ const bar = document.getElementById("bar");
 const hot = document.getElementById("hot");
 const fsBtn = document.getElementById("fs");
 const endBtn = document.getElementById("end");
-let ended = false;
+let ended = false, opened = false;
 
 function finish(text) {
   status.textContent = text;
@@ -292,8 +294,8 @@ function finish(text) {
   if (document.fullscreenElement) document.exitFullscreen();
 }
 
-ws.onopen = () => status.textContent = "waiting for agent…";
-ws.onclose = () => finish(ended ? "session ended" : "disconnected");
+ws.onopen = () => { opened = true; status.textContent = "waiting for agent…"; };
+ws.onclose = () => finish(ended ? "session ended" : (opened ? "agent disconnected" : "could not connect: wrong admin key or session expired"));
 ws.onerror = () => { if (!ended) status.textContent = "error"; };
 
 ws.onmessage = (ev) => {
