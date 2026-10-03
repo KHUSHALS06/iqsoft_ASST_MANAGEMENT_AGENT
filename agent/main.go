@@ -81,7 +81,7 @@ func logCrash(r any) {
 
 // Default server. Override without rebuilding: -server flag, or a server.txt
 // file next to agent.exe containing e.g.  http://192.168.1.5:8080
-var serverURL = "http://192.168.1.5:8080"
+var serverURL = "http://192.168.0.100:8080"
 
 const (
 	inventoryEvery  = 6 * time.Hour   // ADDED: periodic inventory refresh
