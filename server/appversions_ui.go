@@ -237,4 +237,4 @@ refresh();
 </script>`
 
 // dashboardPage is the existing dashboard with the App versions panel appended.
-var dashboardPage = strings.Replace(dashboardHTML, "</body></html>", appVersionsPanel+"</body></html>", 1)
+var dashboardPage = strings.Replace(dashboardHTML, "</body></html>", appVersionsPanel+restrictionsPanel+"</body></html>", 1)

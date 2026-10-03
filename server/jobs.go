@@ -25,7 +25,13 @@ var (
 		"winget_install":    true,
 		"winget_upgrade":    true,
 		"winget_uninstall":  true,
+
+		"apply_restrictions": true, // block install/uninstall on the PC (agent/restrict.go)
+		"clear_restrictions": true, // remove every restriction again
 	}
+
+	// The three switches of an apply_restrictions job. Each must be "0" or "1".
+	restrictionFlags = []string{"block_msi", "block_uninstall", "block_user_exe"}
 )
 
 type Job struct {
@@ -46,8 +52,27 @@ type jobOrder struct {
 }
 
 func cleanParams(jobType string, in map[string]string) (map[string]string, string) {
-	if jobType == "refresh_inventory" {
+	switch jobType {
+	case "refresh_inventory", "clear_restrictions":
 		return map[string]string{}, ""
+	case "apply_restrictions":
+		// Keep only the known switches; anything missing means "off".
+		out := map[string]string{}
+		anyOn := false
+		for _, f := range restrictionFlags {
+			switch in[f] {
+			case "1":
+				out[f], anyOn = "1", true
+			case "", "0":
+				out[f] = "0"
+			default:
+				return nil, f + " must be 0 or 1"
+			}
+		}
+		if !anyOn {
+			return nil, "turn at least one restriction on (use clear_restrictions to remove them all)"
+		}
+		return out, ""
 	}
 	id := in["id"]
 	if !packageIDRe.MatchString(id) {

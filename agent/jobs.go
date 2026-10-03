@@ -92,6 +92,21 @@ func runWinget(action string, params map[string]string) (string, string) {
 	return "failed", err.Error() + "\n" + text
 }
 
+// reapplyIfRestricted re-runs the saved restriction settings, e.g. so apps
+// installed since the last apply also get their Uninstall button hidden.
+// It does nothing on a PC with no restrictions set.
+func reapplyIfRestricted() {
+	restrictMu.Lock()
+	opts := loadRestrictState().Options
+	restrictMu.Unlock()
+	if opts == (RestrictOptions{}) {
+		return
+	}
+	if out, err := applyRestrictions(opts); err != nil {
+		log.Printf("re-applying restrictions failed: %v\n%s", err, out)
+	}
+}
+
 func execute(creds *Creds, j Job) (string, string) {
 	switch j.Type {
 	case "refresh_inventory":
@@ -100,13 +115,22 @@ func execute(creds *Creds, j Job) (string, string) {
 		}
 		return "done", "inventory refreshed"
 	case "winget_install", "winget_upgrade", "winget_uninstall":
-		status, out := runWinget(strings.TrimPrefix(j.Type, "winget_"), j.Params)
+		var status, out string
+		// If install blocking is on, lift it just for this job so the
+		// agent's own install is not stopped by the policy it applied.
+		allowInstallsDuring(func() {
+			status, out = runWinget(strings.TrimPrefix(j.Type, "winget_"), j.Params)
+		})
 		if status == "done" {
+			// A newly installed app has no "hide Uninstall" flag yet.
+			reapplyIfRestricted()
 			if err := sendInventory(creds); err != nil {
 				out += "\ninventory refresh failed: " + err.Error()
 			}
 		}
 		return status, out
+	case "apply_restrictions", "clear_restrictions":
+		return runRestrictJob(j.Type, j.Params)
 	case "start_remote":
 		if err := runRemoteSession(creds, j.Params["session_id"]); err != nil {
 			return "failed", err.Error()
