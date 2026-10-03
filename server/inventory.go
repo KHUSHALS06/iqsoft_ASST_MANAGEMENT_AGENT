@@ -24,6 +24,7 @@ func registerInventory() {
 			return
 		}
 		mu.Lock()
+		recordHistory(d.ID, inventories[d.ID], body)
 		inventories[d.ID] = body
 		save()
 		mu.Unlock()

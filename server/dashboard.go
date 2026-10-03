@@ -21,10 +21,8 @@ const dashboardHTML = `<!doctype html>
 <div>
  <input id="key" type="password" placeholder="Admin key" size="24">
  <button id="load">Load</button>
- <button id="newtok">New enrollment token</button>
  <span id="err"></span>
 </div>
-<div id="tokbox"></div>
 <div class="box"><h2>Devices</h2>
 <table><thead><tr><th>Computer</th><th>Status</th><th>Last seen</th><th>Model</th><th>OS</th><th>User</th><th>Apps</th></tr></thead>
 <tbody id="rows"><tr><td colspan="7">Enter the admin key and click Load.</td></tr></tbody></table></div>
@@ -34,6 +32,7 @@ var $ = function(id){ return document.getElementById(id); };
 function el(tag, text, cls){ var e=document.createElement(tag); if(text!=null) e.textContent=text; if(cls) e.className=cls; return e; }
 function row(cells){ var tr=el('tr'); cells.forEach(function(c){ tr.appendChild(typeof c==='string'?el('td',c):c); }); return tr; }
 var selected = null, selectedDev = null, invCache = null, doneSeen = null;
+var usageDays = 7;
 
 function api(path, method, body){
   var h = {'X-Admin-Key': $('key').value};
@@ -59,7 +58,7 @@ function loadList(){
     $('err').textContent = '';
     sessionStorage.setItem('adminkey', $('key').value);
     var tb=$('rows'); tb.replaceChildren();
-    if(!list.length){ tb.appendChild(row(['No devices yet. Click "New enrollment token" and enroll an agent.','','','','','',''])); return; }
+    if(!list.length){ tb.appendChild(row(['No devices yet. Start the agent on a computer and it will appear here.','','','','','',''])); return; }
     list.sort(function(a,b){ return a.hostname.localeCompare(b.hostname); });
     list.forEach(function(d){
       var tr = row([d.hostname, el('td', d.online?'Online':'Offline', d.online?'on':'off'), ago(d.last_seen), d.model, d.os, d.user, d.apps?String(d.apps):'']);
@@ -166,6 +165,15 @@ function actionsBox(d){
   box.appendChild(line);
   box.appendChild(el('h3', 'Recent jobs'));
   var jl = el('div'); jl.id = 'jobs'; box.appendChild(jl);
+  box.appendChild(el('h3', 'Install / uninstall history'));
+  var hl = el('div'); hl.id = 'hist'; box.appendChild(hl);
+  box.appendChild(el('h3', 'App usage'));
+  var us = el('select'); us.style.padding = '5px';
+  [['1','Today'],['7','Last 7 days'],['30','Last 30 days']].forEach(function(o){ us.appendChild(new Option(o[1], o[0])); });
+  us.value = String(usageDays);
+  us.onchange = function(){ usageDays = parseInt(us.value, 10); loadUsage(); };
+  box.appendChild(us);
+  var ul = el('div'); ul.id = 'usage'; box.appendChild(ul);
   return box;
 }
 
@@ -183,9 +191,75 @@ function drawJobs(list){
   box.replaceChildren(t);
 }
 
+function drawHistory(list){
+  var box = $('hist'); if(!box) return;
+  if(!list.length){ box.replaceChildren(el('p', 'No changes recorded yet. Changes appear after the device sends a second inventory.')); return; }
+  var t = el('table');
+  t.appendChild(row(['When', 'Change', 'Software', 'Type', 'Version']));
+  list.forEach(function(h){
+    var kind = h.kind==='installed' ? 'Installed' : (h.kind==='removed' ? 'Removed' : 'Version changed');
+    var ver = h.kind==='installed' ? (h.new_version||'') : (h.kind==='removed' ? (h.old_version||'') : (h.old_version||'?')+' \u2192 '+(h.new_version||'?'));
+    var k = el('td', kind, h.kind==='installed' ? 'on' : (h.kind==='removed' ? 'off' : null));
+    t.appendChild(row([new Date(h.time).toLocaleString(), k, h.name, h.source||'', ver]));
+  });
+  box.replaceChildren(t);
+}
+
+function loadHistory(){
+  if(!selected || !$('hist')) return;
+  var dev = selectedDev;
+  api('/admin/devices/'+selected+'/history').then(function(list){
+    if(dev !== selectedDev) return;
+    drawHistory(list);
+  }).catch(function(){});
+}
+
+function fmtDur(sec){
+  var m = Math.round(sec/60);
+  if(m < 1) return '<1m';
+  if(m < 60) return m+'m';
+  return Math.floor(m/60)+'h '+(m%60)+'m';
+}
+
+function drawUsage(u){
+  var box = $('usage'); if(!box) return;
+  var days = u.days || [], sessions = u.sessions || [];
+  if(!days.length && !sessions.length){ box.replaceChildren(el('p', 'No usage recorded yet. The agent uploads usage every few minutes.')); return; }
+  var tot = {}, all = 0;
+  days.forEach(function(d){ d.apps.forEach(function(a){ tot[a.app] = (tot[a.app]||0) + a.seconds; all += a.seconds; }); });
+  var apps = Object.keys(tot).sort(function(a,b){ return tot[b]-tot[a]; });
+  var wrap = el('div');
+  var t = el('table'); t.style.marginTop = '8px';
+  t.appendChild(row(['App', 'Time used', 'Share']));
+  apps.slice(0, 25).forEach(function(a){
+    t.appendChild(row([a, fmtDur(tot[a]), all ? Math.round(tot[a]*100/all)+'%' : '']));
+  });
+  wrap.appendChild(el('p', 'Total active time: '+fmtDur(all)));
+  wrap.appendChild(t);
+  wrap.appendChild(el('h3', 'Recent sessions'));
+  var st = el('table');
+  st.appendChild(row(['Started', 'App', 'Duration', 'Ended']));
+  sessions.slice(0, 50).forEach(function(x){
+    st.appendChild(row([new Date(x.start).toLocaleString(), x.app, fmtDur((new Date(x.end)-new Date(x.start))/1000), new Date(x.end).toLocaleTimeString()]));
+  });
+  wrap.appendChild(st);
+  box.replaceChildren(wrap);
+}
+
+function loadUsage(){
+  if(!selected || !$('usage')) return;
+  var dev = selectedDev;
+  api('/admin/devices/'+selected+'/usage?days='+usageDays).then(function(u){
+    if(dev !== selectedDev) return;
+    drawUsage(u);
+  }).catch(function(){});
+}
+
 function loadJobs(){
   if(!selected || !$('jobs')) return;
   var dev = selectedDev;
+  loadHistory();
+  loadUsage();
   api('/admin/devices/'+selected+'/jobs').then(function(list){
     if(dev !== selectedDev) return;
     var ids = {}, newDone = false;
@@ -199,12 +273,6 @@ function loadJobs(){
 }
 
 $('load').onclick = loadList;
-$('newtok').onclick = function(){
-  api('/admin/token','POST').then(function(r){
-    var b=$('tokbox'); b.style.display='block'; $('err').textContent='';
-    b.textContent = 'Token (single use): '+r.token+'\n\nOn the computer, run:\n  go run ./agent -enroll '+r.token;
-  }).catch(fail);
-};
 $('key').value = sessionStorage.getItem('adminkey') || '';
 if($('key').value) loadList();
 setInterval(function(){ if($('key').value && !$('err').textContent){ loadList(); loadJobs(); } }, 5000);

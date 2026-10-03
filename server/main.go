@@ -237,6 +237,7 @@ func main() {
 	registerJobs()
 	registerRemote()
 	registerAppVersions()
+	registerWingetSearch()
 
 	log.Println("server listening on :8080  (dashboard: http://localhost:8080)")
 	log.Fatal(http.ListenAndServe(":8080", nil))
