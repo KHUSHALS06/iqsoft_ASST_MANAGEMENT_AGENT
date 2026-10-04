@@ -105,6 +105,36 @@ function loadDetail(d){
   });
 }
 
+function tierClass(t){ return (t==='Premium'||t==='Likely premium') ? 'on' : (t==='Unlicensed' ? 'off' : null); }
+function licensesSection(inv){
+  var wrap = el('div'), lics = inv.licenses || [];
+  wrap.appendChild(el('h3', 'Licences & subscriptions ('+lics.length+')'));
+  if(!lics.length){ wrap.appendChild(el('p', 'No Microsoft Office or Adobe products found yet. Click Refresh inventory if the agent was just updated.')); return wrap; }
+  var t = el('table');
+  t.appendChild(row(['Vendor','Product','Version','Type','Tier','Status','How we know']));
+  lics.forEach(function(l){
+    t.appendChild(row([l.vendor||'', l.product||'', l.version||'', l.type||'', el('td', l.tier||'', tierClass(l.tier)), l.status||'', l.basis||'']));
+  });
+  wrap.appendChild(t);
+  var n = el('small', 'Read from this PC only. Who pays for a subscription, and the Adobe account, are not visible on the device. "Likely premium" means the licence state could not be verified.');
+  n.style.color = 'var(--mut)'; wrap.appendChild(n);
+  return wrap;
+}
+function accountsSection(inv){
+  var wrap = el('div'), acc = inv.accounts || [];
+  wrap.appendChild(el('h3', 'Signed-in accounts ('+acc.length+')'));
+  if(!acc.length){ wrap.appendChild(el('p', 'No signed-in app accounts found yet.')); return wrap; }
+  var t = el('table');
+  t.appendChild(row(['App','Account','Type','Plan','Windows user','Last seen']));
+  acc.forEach(function(a){
+    var seen = a.seen_at ? ago(a.seen_at) : '';
+    if(a.stale) seen += ' (user not signed in now)';
+    t.appendChild(row([a.app||'', a.account||'\u2014', [a.kind||'', a.name||''].filter(Boolean).join(' \u00b7 '), a.plan||'', a.user||'', seen]));
+  });
+  wrap.appendChild(t);
+  return wrap;
+}
+
 function renderDetail(d, inv){
   var hw = inv.hardware || {}, box = el('div',null,'box');
   box.appendChild(el('h2', d.hostname+'  ('+d.id+')'));
@@ -119,6 +149,8 @@ function renderDetail(d, inv){
     var v=el('td', p[1]); v.style.whiteSpace='pre-wrap'; kv.appendChild(row([p[0], v]));
   });
   box.appendChild(kv);
+  box.appendChild(licensesSection(inv));
+  box.appendChild(accountsSection(inv));
   var sw = (inv.software||[]).slice().sort(function(a,b){ return a.name.toLowerCase()<b.name.toLowerCase()?-1:1; });
   box.appendChild(el('h3', 'Installed software ('+sw.length+')'));
   var f = el('input'); f.placeholder='Filter by name, publisher, type or location'; f.size=30; box.appendChild(f);

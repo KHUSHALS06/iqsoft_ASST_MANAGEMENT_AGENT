@@ -239,6 +239,7 @@ func main() {
 	registerAppVersions()
 	registerRestrictions()
 	registerWingetSearch()
+	registerAccounts()
 
 	log.Println("server listening on :8080  (dashboard: http://localhost:8080)")
 	log.Fatal(http.ListenAndServe(":8080", nil))

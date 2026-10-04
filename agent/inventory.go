@@ -71,6 +71,15 @@ func collectInventory() ([]byte, error) {
 		return nil, err
 	}
 	payload["software"] = json.RawMessage(swOut)
+
+	// Licences + signed-in accounts (accounts.go). Never fails the inventory.
+	accts, lics := collectAccounts()
+	if b, err := json.Marshal(accts); err == nil {
+		payload["accounts"] = b
+	}
+	if b, err := json.Marshal(lics); err == nil {
+		payload["licenses"] = b
+	}
 	return json.Marshal(payload)
 }
 
